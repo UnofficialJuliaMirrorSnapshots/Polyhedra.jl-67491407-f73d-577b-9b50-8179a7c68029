@@ -3,6 +3,17 @@ export LPHRep
 MOI.Utilities.@model(_MOIModel,
                      (), (MOI.EqualTo, MOI.LessThan,), (), (),
                      (), (MOI.ScalarAffineFunction,), (), ())
+# We need the `SingleVariable` constraints to be bridged so we should say that
+# they are not supported. We notably exclude `Integer` as we just ignore
+# integrality constraints. Binary constraint should be bridged to integrality
+# once https://github.com/JuliaOpt/MathOptInterface.jl/issues/704 is done.
+function MOI.supports_constraint(
+    ::_MOIModel{T}, ::Type{MOI.SingleVariable},
+    ::Type{<:Union{MOI.EqualTo{T}, MOI.GreaterThan{T}, MOI.LessThan{T},
+                   MOI.Interval{T}, MOI.ZeroOne}}) where T
+    return false
+end
+
 
 mutable struct LPHRep{T} <: HRepresentation{T}
     model::_MOIModel{T}
@@ -16,9 +27,26 @@ end
 function LPHRep(model::_MOIModel{T}) where T
     return LPHRep(model, nothing, nothing)
 end
-function LPHRep(model::MOI.ModelLike)
-    _model = _MOIModel{Float64}()
-    MOI.copy_to(MOI.Bridges.full_bridge_optimizer(_model, Float64), model)
+function LPHRep(model::MOI.ModelLike, T::Type = Float64)
+    _model = _MOIModel{T}()
+    bridged = MOI.Bridges.LazyBridgeOptimizer(_model)
+    # Only enable constraint bridges that don't create variables and don't add
+    # any variable bridge so that there is an identity mapping betwenen
+    # variables of `model` and polyhedra dimensions.
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.GreaterToLessBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.LessToGreaterBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.NonnegToNonposBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.NonposToNonnegBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.ScalarizeBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.VectorizeBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.ScalarFunctionizeBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.VectorFunctionizeBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.SplitIntervalBridge{T})
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.NormInfinityBridge{T})
+    # This one creates variables so the user need to consider the polyhedra as the
+    # feasible set of the extended formulation.
+    MOI.Bridges.add_bridge(bridged, MOI.Bridges.Constraint.NormOneBridge{T})
+    MOI.copy_to(bridged, model)
     return LPHRep(_model)
 end
 # returns `Int64` so need to convert for 32-bit system
@@ -120,7 +148,7 @@ function Base.get(rep::LPHRep{T}, idx::HIndex{T}) where {T}
     values = [t.coefficient for t in func.terms]
     a = sparsevec(indices, values, FullDim(rep))
     set = MOI.get(rep.model, MOI.ConstraintSet(), ci)
-    β = MOI.Utilities.getconstant(set) - func.constant
+    β = MOI.constant(set) - func.constant
     if idx isa HyperPlaneIndex
         return HyperPlane(a, β)
     else
